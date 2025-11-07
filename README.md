@@ -1,5 +1,7 @@
 # AWS Scalable Disk Monitoring (Ansible + CloudWatch + SSM)
 
+# Please read the file : Solution Implementation with Architecture.txt provided in the repo for detailed architecture and explanation
+
 This repository implements a scalable disk utilization monitoring solution for EC2 instances across multiple AWS accounts using **Ansible**, **CloudWatch**, and **SSM**.
 
 ## Setup

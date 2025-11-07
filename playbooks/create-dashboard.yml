@@ -1,0 +1,29 @@
+---
+- name: Create CloudWatch dashboard
+  hosts: localhost
+  connection: local
+  vars:
+    region: "ap-south-1"
+    dashboard_body: |
+      {
+        "widgets": [
+          {
+            "type": "metric",
+            "x": 0, "y": 0, "width": 12, "height": 6,
+            "properties": {
+              "title": "Disk Used % — All Instances",
+              "region": "{{ region }}",
+              "metrics": [
+                [ "CWAgent", "disk_used_percent", "path", "/", { "stat": "Average" } ]
+              ]
+            }
+          }
+        ]
+      }
+  tasks:
+    - name: Put dashboard
+      amazon.aws.cloudwatch_dashboard:
+        state: present
+        dashboard_name: "Fleet-Disk-Overview"
+        dashboard_body: "{{ dashboard_body }}"
+        region: "{{ region }}"

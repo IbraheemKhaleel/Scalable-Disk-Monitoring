@@ -1,0 +1,8 @@
+plugin: amazon.aws.aws_ssm
+regions:
+  - ap-south-1
+filters:
+  - Key: "tag:Monitoring"
+    Values: ["Enabled"]
+strict: False
+aws_profile: monitoring

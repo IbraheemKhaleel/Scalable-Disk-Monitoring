@@ -1,0 +1,13 @@
+---
+- name: Ensure CloudWatch Agent installed via SSM Distributor (Linux)
+  amazon.aws.ssm_parameter_store:
+    name: "{{ cwagent_param_path_linux }}"
+    state: get
+  register: cwagent_config_check
+  failed_when: false
+
+- name: Install CloudWatch Agent package
+  become: true
+  ansible.builtin.package:
+    name: amazon-cloudwatch-agent
+    state: present

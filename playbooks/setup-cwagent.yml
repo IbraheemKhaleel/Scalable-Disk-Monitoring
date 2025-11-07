@@ -1,0 +1,7 @@
+---
+- name: Install & configure CloudWatch Agent on Linux
+  hosts: tag_Monitoring_Enabled
+  gather_facts: true
+  roles:
+    - role: cloudwatch_agent
+      tags: ['cwagent']

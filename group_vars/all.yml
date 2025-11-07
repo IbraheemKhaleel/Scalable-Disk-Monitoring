@@ -1,0 +1,9 @@
+cwagent_param_path_linux: "/monitoring/cwagent/linux"
+alarm_namespace: "CWAgent"
+alarm_metric_name: "disk_used_percent"
+alarm_threshold: 85
+alarm_period: 300
+alarm_evaluations: 2
+alarm_stat: "Average"
+alarm_sns_topic_arn: "arn:aws:sns:ap-south-1:111122223333:disk-alerts"
+dashboard_name: "Fleet-Disk-Overview"

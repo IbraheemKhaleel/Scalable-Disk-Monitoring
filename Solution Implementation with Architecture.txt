@@ -1,0 +1,459 @@
+Scalable Disk Monitoring on AWS (with Ansible)
+1) High-level Architecture (text diagram)
+                        ┌──────────────────────────────────────────────────────┐
+                        │                 Monitoring Account                   │
+                        │                                                      │
+                        │  IAM Role: OrgMonitoringRole                         │
+   Engineer PC          │  CloudWatch Dashboards + Alarms                      │
+(Ansible Control Node)  │  SNS/Chatbot (Slack/Email)                           │
+        │               │  OAM Links for X-Account observability               │
+        │               └──────────────▲───────────────────────────────────────┘
+        │                              │
+        │  aws:assume_role             │  view metrics + read logs/metrics
+        ▼                              │
+┌─────────────────────────────────────────────────────────────────────────────┐
+│             Multiple AWS Member Accounts (A, B, C … across Regions)        │
+│                                                                             │
+│  EC2/VMs ──────────► SSM Managed Instances                                  │
+│     │               │  - SSM Agent (preinstalled on most AMIs)              │
+│     │               │  - CloudWatch Agent (installed/configured by SSM/Ansible)
+│     │               │  - Instance Profile: SSM + CWAgent                     │
+│     │               │                                                        │
+│     │    disk_used_percent, fs metrics  ───────────► CloudWatch (member)    │
+│     │                                                       ▲               │
+│     │                             OAM link exposes metrics  │               │
+│     └───────────────────────────────────────────────────────┼───────────────┘
+│                                                             │
+│  EventBridge (optional) -> SSM State Manager Associations   │
+│  Tag-based auto-enrollment (e.g., Tag: Monitoring=Enabled)  │
+└─────────────────────────────────────────────────────────────┘
+
+
+Key ideas
+
+No SSH: Use AWS Systems Manager (SSM) Session Manager + Run Command for secure access.
+
+CloudWatch Agent publishes disk metrics per filesystem/volume.
+
+Observability Access Manager (OAM) links member accounts to one Monitoring account for central dashboards/alarms.
+
+Ansible handles: cross-account inventory, SSM bootstrap, CW Agent config, and alarm creation.
+
+Tag-based auto-enrollment scales as accounts/VMs grow.
+
+2) Access Management (Secure, Cross-Account)
+Control plane
+
+Put your Ansible controller in the Monitoring account (or on-prem with AWS credentials).
+
+Use IAM Role per member account (e.g., OrganizationAccountAccessRole or a custom AnsibleAutomationRole) that trusts the Monitoring account. Minimal permissions:
+
+ssm:* (scoped to Region/* and tags), ec2:Describe*, cloudwatch:PutMetricAlarm, cloudwatch:List*, cloudwatch:DeleteAlarms, cloudformation:* (if you template alarms), and oam:List* for visibility (create OAM links once with admin).
+
+SSM Session Manager replaces SSH. Block SSH inbound; use VPC endpoints for SSM in private subnets.
+
+Data plane
+
+Instance Profile on each VM includes:
+
+AmazonSSMManagedInstanceCore
+
+CloudWatchAgentServerPolicy (or least-privilege variant for PutMetricData, GetParameter on the config path)
+
+Store CloudWatch Agent config in Parameter Store (e.g., /monitoring/cwagent/linux), readable by those instance profiles.
+
+3) VM Discovery & Enrollment
+
+Choose either (or both):
+
+Ansible dynamic inventory — aws_ec2 plugin
+
+Discovers EC2 instances by tags/filters across accounts/regions using assume_role.
+
+Ansible dynamic inventory — aws_ssm plugin
+
+Discovers SSM managed instances (works even if instances don’t have public IPs).
+
+Tagging standard (examples):
+
+Monitoring=Enabled
+
+Environment=Prod|Staging
+
+BusinessUnit=Payments
+
+Enrollment flow:
+
+New VM with the instance profile + tag Monitoring=Enabled → SSM registers automatically → Ansible (or SSM State Manager Association) installs/configures CloudWatch Agent → metrics appear in CloudWatch → central dashboards/alarms see it automatically via OAM link.
+
+4) Data Collection & Aggregation
+
+CloudWatch Agent collects:
+
+disk_used_percent, disk_inodes_free, disk_total, disk_used, logical_volume metrics, etc.
+
+Metrics namespace: CWAgent.
+
+Aggregation/Visualization
+
+CloudWatch Dashboards in Monitoring account (via OAM cross-account observability).
+
+Alerts via CloudWatch Alarms → SNS → email or AWS Chatbot → Slack/Teams.
+
+Optional: Metric Streams → Firehose → S3 (+ Athena/Grafana/QuickSight) for long-term analytics.
+
+5) Scalability
+
+No per-host SSH; everything uses SSM.
+
+Tag-based auto-enroll and State Manager Associations to install CW Agent on all instances with Monitoring=Enabled.
+
+OAM scales dashboards/alarms across accounts/regions without duplicating assets.
+
+For alarms:
+
+Start with per-instance thresholds (e.g., < 15% free for 5 min).
+
+For very large fleets, switch to:
+
+Ansible/Lambda automation that creates alarms on instance creation, or
+
+Metric Math SEARCH-based alarms (fleet-level) and/or composite alarms to avoid alert storms.
+
+6) GitHub-ready Repo Structure
+aws-disk-monitoring-ansible/
+├─ README.md
+├─ ansible.cfg
+├─ inventories/
+│  ├─ aws_ec2.yml          # EC2 inventory (assume_role + tag filters)
+│  └─ aws_ssm.yml          # SSM inventory (managed instances)
+├─ group_vars/
+│  └─ all.yml              # common vars (SNS topics, thresholds, regions)
+├─ roles/
+│  └─ cloudwatch_agent/
+│     ├─ tasks/
+│     │  ├─ install.yml    # install via SSM Distributor or package mgr
+│     │  ├─ configure.yml  # fetch config from SSM Parameter Store
+│     │  └─ restart.yml
+│     └─ files/
+│        └─ cwagent-linux.json  # fallback local config
+├─ playbooks/
+│  ├─ bootstrap-ssm.yml        # ensure SSM + instance profile sanity
+│  ├─ setup-cwagent.yml        # install+configure CloudWatch Agent
+│  ├─ create-alarms.yml        # per-instance/per-filesystem alarms
+│  └─ create-dashboard.yml     # sample fleet dashboard (JSON)
+└─ policies/
+   ├─ InstanceProfile-Policy.json
+   └─ AnsibleAutomationRole-Policy.json
+
+7) Ansible — Key Files (Minimal Working)
+ansible.cfg
+[defaults]
+inventory = inventories/aws_ec2.yml
+host_key_checking = False
+interpreter_python = auto_silent
+deprecation_warnings = False
+
+inventories/aws_ec2.yml (dynamic inventory via EC2)
+plugin: amazon.aws.aws_ec2
+regions:
+  - ap-south-1
+  - ap-southeast-1
+  - us-east-1
+keyed_groups:
+  - key: tags.Environment
+  - key: tags.Monitoring
+filters:
+  tag:Monitoring: Enabled
+compose:
+  ansible_host: private_ip_address
+strict: False
+
+# Cross-account: use profiles that assume into member accounts
+# Configure ~/.aws/config with named profiles using role_arn + source_profile
+aws_profile: monitoring
+
+inventories/aws_ssm.yml (alternative: inventory via SSM)
+plugin: amazon.aws.aws_ssm
+regions:
+  - ap-south-1
+  - ap-southeast-1
+filters:
+  - Key: "tag:Monitoring"
+    Values: ["Enabled"]
+strict: False
+aws_profile: monitoring
+
+group_vars/all.yml
+cwagent_param_path_linux: "/monitoring/cwagent/linux"
+alarm_namespace: "CWAgent"
+alarm_metric_name: "disk_used_percent"
+alarm_threshold: 85           # alarm when >85% used (= <15% free)
+alarm_period: 300
+alarm_evaluations: 2
+alarm_stat: "Average"
+alarm_sns_topic_arn: "arn:aws:sns:ap-south-1:<account-number>:disk-alerts"
+dashboard_name: "Fleet-Disk-Overview"
+
+Role: roles/cloudwatch_agent/tasks/install.yml
+---
+- name: Ensure CloudWatch Agent installed via SSM Distributor (Linux)
+  amazon.aws.ssm_parameter_store:
+    name: "{{ cwagent_param_path_linux }}"
+    state: get
+  register: cwagent_config_check
+  failed_when: false
+
+- name: Install CloudWatch Agent package (Amazon Linux/Debian/Ubuntu/RHEL)
+  become: true
+  ansible.builtin.package:
+    name: amazon-cloudwatch-agent
+    state: present
+
+
+
+Role: roles/cloudwatch_agent/tasks/configure.yml
+---
+- name: Try to fetch CW Agent config from Parameter Store
+  amazon.aws.aws_ssm_parameter_store:
+    name: "{{ cwagent_param_path_linux }}"
+    with_decryption: false
+    region: "{{ lookup('env','AWS_REGION') | default('ap-south-1') }}"
+  register: cwparam
+  failed_when: false
+
+- name: Drop CW Agent config (from SSM or local fallback)
+  become: true
+  ansible.builtin.copy:
+    content: "{{ (cwparam.parameter.value | default(lookup('file','roles/cloudwatch_agent/files/cwagent-linux.json'))) }}"
+    dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+    owner: root
+    group: root
+    mode: '0644'
+
+Role: roles/cloudwatch_agent/tasks/restart.yml
+---
+- name: Restart CloudWatch Agent
+  become: true
+  ansible.builtin.shell: |
+    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+      -a stop
+    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+      -a start
+  args:
+    executable: /bin/bash
+
+roles/cloudwatch_agent/files/cwagent-linux.json (fallback config)
+{
+  "metrics": {
+    "namespace": "CWAgent",
+    "append_dimensions": {
+      "AutoScalingGroupName": "${aws:AutoScalingGroupName}",
+      "InstanceId": "${aws:InstanceId}"
+    },
+    "aggregation_dimensions": [["InstanceId"], ["AutoScalingGroupName"]],
+    "metrics_collected": {
+      "disk": {
+        "measurement": ["used_percent", "used", "total", "inodes_free"],
+        "resources": ["*"],
+        "ignore_file_system_types": ["sysfs","devtmpfs","overlay","squashfs","tmpfs","devfs","nsfs","proc","cgroup*","tracefs","rpc_pipefs","debugfs","fusectl","securityfs","configfs","efivarfs"]
+      }
+    }
+  }
+}
+
+playbooks/setup-cwagent.yml
+---
+- name: Install & configure CloudWatch Agent on Linux
+  hosts: tag_Monitoring_Enabled
+  gather_facts: true
+  roles:
+    - role: cloudwatch_agent
+      tags: ['cwagent']
+
+playbooks/create-alarms.yml (per-instance alarms)
+---
+- name: Create disk usage alarms per instance
+  hosts: tag_Monitoring_Enabled
+  gather_facts: false
+  vars:
+    filesystems: ["/", "/var", "/opt"]   # adjust if needed
+  tasks:
+    - name: Get EC2 instance ID (from facts or metadata)
+      amazon.aws.ec2_metadata_facts:
+      register: meta
+      when: meta is not defined
+
+    - name: Ensure CloudWatch alarms for each filesystem
+      loop: "{{ filesystems }}"
+      loop_control:
+        loop_var: fs
+      amazon.aws.cloudwatch_metric_alarm:
+        state: present
+        name: "DiskUsedPct-{{ fs | regex_replace('[^a-zA-Z0-9]', '') }}-{{ meta.ansible_facts.ansible_ec2_instance_id | default(hostvars[inventory_hostname].ec2_instance_id) }}"
+        metric: "{{ alarm_metric_name }}"
+        namespace: "{{ alarm_namespace }}"
+        statistic: "{{ alarm_stat }}"
+        comparison: ">"
+        threshold: "{{ alarm_threshold }}"
+        period: "{{ alarm_period }}"
+        evaluation_periods: "{{ alarm_evaluations }}"
+        alarm_description: "Disk used percent on {{ fs }} above {{ alarm_threshold }}%."
+        dimensions:
+          InstanceId: "{{ meta.ansible_facts.ansible_ec2_instance_id | default(hostvars[inventory_hostname].ec2_instance_id) }}"
+          path: "{{ fs }}"
+          fstype: "xfs"    # omit if not using per-fstype dimension; adjust if needed
+        alarm_actions:
+          - "{{ alarm_sns_topic_arn }}"
+        ok_actions:
+          - "{{ alarm_sns_topic_arn }}"
+
+
+Note: CloudWatch Agent emits disk_used_percent with dimensions (commonly InstanceId, path, fstype, and sometimes device). Adjust dimensions to match what you see in your account. Start with InstanceId + path.
+
+playbooks/create-dashboard.yml (sample)
+---
+- name: Create/Update CloudWatch dashboard
+  hosts: localhost
+  connection: local
+  vars:
+    region: "ap-south-1"
+    dashboard_body: |
+      {
+        "widgets": [
+          {
+            "type": "metric",
+            "x": 0, "y": 0, "width": 12, "height": 6,
+            "properties": {
+              "title": "Disk Used % — Top Paths (All Instances)",
+              "region": "{{ region }}",
+              "view": "timeSeries",
+              "stacked": false,
+              "metrics": [
+                [ "CWAgent", "disk_used_percent", "path", "/", { "stat": "Average" } ],
+                [ ".", "disk_used_percent", "path", "/var", { "stat": "Average" } ],
+                [ ".", "disk_used_percent", "path", "/opt", { "stat": "Average" } ]
+              ],
+              "period": 300
+            }
+          }
+        ]
+      }
+  tasks:
+    - name: Put dashboard
+      amazon.aws.cloudwatch_dashboard:
+        state: present
+        dashboard_name: "{{ dashboard_name }}"
+        dashboard_body: "{{ dashboard_body }}"
+        region: "{{ region }}"
+
+8) Policies (Minimum Starting Point)
+policies/InstanceProfile-Policy.json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow", "Action": [
+        "ssm:UpdateInstanceInformation",
+        "ssmmessages:*",
+        "ec2messages:*"
+      ], "Resource": "*" },
+    { "Effect": "Allow", "Action": [
+        "cloudwatch:PutMetricData",
+        "cloudwatch:GetMetricData",
+        "cloudwatch:ListMetrics",
+        "logs:PutLogEvents",
+        "logs:CreateLogStream",
+        "logs:CreateLogGroup",
+        "ssm:GetParameter"
+      ], "Resource": "*" }
+  ]
+}
+
+
+Attach AWS managed:
+
+AmazonSSMManagedInstanceCore
+
+CloudWatchAgentServerPolicy
+(or keep the above custom least-privilege where acceptable)
+
+policies/AnsibleAutomationRole-Policy.json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow", "Action": [
+        "ec2:Describe*",
+        "ssm:Describe*","ssm:Get*","ssm:List*","ssm:SendCommand",
+        "cloudwatch:PutMetricAlarm","cloudwatch:DeleteAlarms","cloudwatch:Describe*","cloudwatch:List*",
+        "oam:List*"
+      ], "Resource": "*" }
+  ]
+}
+
+
+Trust policy for this role should trust the Monitoring account (where Ansible runs).
+
+9) Operations — How to Run
+
+Bootstrap (once per account/region):
+
+Create OAM links to share metrics to the Monitoring account.
+
+Create SNS topic for alerts (and subscribe email/Chatbot).
+
+Ensure instance profile on AMIs/launch templates.
+
+Run Ansible:
+
+# 0) (optional) switch inventory to SSM or EC2:
+export ANSIBLE_INVENTORY=./inventories/aws_ec2.yml
+
+# 1) Install & configure CloudWatch Agent
+ansible-playbook playbooks/setup-cwagent.yml -v
+
+# 2) Create per-instance alarms on key filesystems
+ansible-playbook playbooks/create-alarms.yml -v
+
+# 3) Create dashboard (in Monitoring account region)
+ansible-playbook playbooks/create-dashboard.yml -v
+
+
+Validate
+
+In member accounts: CloudWatch → Metrics → CWAgent → disk_used_percent.
+
+In Monitoring account: CloudWatch → Dashboards + Alarms (visible via OAM).
+
+Trigger a test by filling a test volume and watching the alarm fire to SNS.
+
+10) Why this meets the brief
+
+Ease of Access & Management
+
+Centralized Monitoring account with assume-role; no SSH, SSM only.
+
+Ansible uses dynamic inventory (EC2 or SSM) + role assumption.
+
+Data Collection & Aggregation
+
+CloudWatch Agent for accurate disk metrics; CloudWatch for storage, Dashboards for visualization, SNS/Chatbot for alerts.
+
+Scalability
+
+Tag-based enrollment, State Manager or Ansible for agent rollout at scale.
+
+OAM for cross-account visibility; optional Metric Streams for lake/BI.
+
+Extensible alarm strategy (per-instance → fleet-level/composite as you grow).
+
+11) Optional Enhancements (nice-to-have)
+
+State Manager Associations that automatically install/configure CloudWatch Agent on any instance with Monitoring=Enabled — zero Ansible touch after bootstrap.
+
+EventBridge rule on EC2 Instance State-change Notification → Lambda to auto-create/delete per-instance alarms.
+
+Metric Math + SEARCH alarms to avoid per-filesystem alarms.
+
+KMS CMK for SSM Parameter Store configs and SNS topics.
+
+Patch baselines & SSM Inventory for hygiene reporting.

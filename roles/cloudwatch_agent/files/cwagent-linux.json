@@ -1,0 +1,14 @@
+{
+  "metrics": {
+    "namespace": "CWAgent",
+    "append_dimensions": {
+      "InstanceId": "${aws:InstanceId}"
+    },
+    "metrics_collected": {
+      "disk": {
+        "measurement": ["used_percent", "used", "total", "inodes_free"],
+        "resources": ["*"]
+      }
+    }
+  }
+}

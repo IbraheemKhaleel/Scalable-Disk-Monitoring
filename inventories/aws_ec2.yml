@@ -1,0 +1,12 @@
+plugin: amazon.aws.aws_ec2
+regions:
+  - ap-south-1
+keyed_groups:
+  - key: tags.Environment
+  - key: tags.Monitoring
+filters:
+  tag:Monitoring: Enabled
+compose:
+  ansible_host: private_ip_address
+strict: False
+aws_profile: monitoring

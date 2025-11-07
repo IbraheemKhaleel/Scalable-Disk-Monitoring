@@ -1,0 +1,16 @@
+---
+- name: Try to fetch CW Agent config from Parameter Store
+  amazon.aws.aws_ssm_parameter_store:
+    name: "{{ cwagent_param_path_linux }}"
+    with_decryption: false
+  register: cwparam
+  failed_when: false
+
+- name: Drop CW Agent config (from SSM or local fallback)
+  become: true
+  ansible.builtin.copy:
+    content: "{{ (cwparam.parameter.value | default(lookup('file','roles/cloudwatch_agent/files/cwagent-linux.json'))) }}"
+    dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+    owner: root
+    group: root
+    mode: '0644'

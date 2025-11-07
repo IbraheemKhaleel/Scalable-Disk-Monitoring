@@ -1,0 +1,27 @@
+---
+- name: Create disk usage alarms per instance
+  hosts: tag_Monitoring_Enabled
+  gather_facts: false
+  vars:
+    filesystems: ["/", "/var", "/opt"]
+  tasks:
+    - name: Get EC2 instance ID
+      amazon.aws.ec2_metadata_facts:
+      register: meta
+
+    - name: Ensure CloudWatch alarms for each filesystem
+      loop: "{{ filesystems }}"
+      loop_control:
+        loop_var: fs
+      amazon.aws.cloudwatch_metric_alarm:
+        state: present
+        name: "DiskUsedPct-{{ fs | regex_replace('[^a-zA-Z0-9]', '') }}-{{ meta.ansible_facts.ansible_ec2_instance_id }}"
+        metric: "disk_used_percent"
+        namespace: "CWAgent"
+        statistic: "Average"
+        comparison: ">"
+        threshold: 85
+        period: 300
+        evaluation_periods: 2
+        alarm_actions:
+          - "arn:aws:sns:ap-south-1:111122223333:disk-alerts"
